@@ -201,15 +201,15 @@ pub mod config {
 }
 
 pub mod producer {
-    use rdkafka::client::DefaultClientContext;
     use rdkafka::config::FromClientConfig;
     use rdkafka::producer::future_producer::OwnedDeliveryResult;
     use rdkafka::producer::{FutureProducer, FutureRecord};
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
+    use crate::kafka::kafka::producers::Producers;
 
     pub struct Producer {
-        producer: FutureProducer<DefaultClientContext>,
+        producer: Producers,
         sent_messages_counter: prometheus::IntCounterVec,
         queue_size_gauge: prometheus::IntGaugeVec,
         error_counter: prometheus::IntCounterVec,
@@ -238,7 +238,7 @@ pub mod producer {
             };
 
             let start = SystemTime::now();
-            let result = self.producer.send(record, timeout).await;
+            let result = self.producer.next().unwrap().send(record, timeout).await;
             self.message_send_duration
                 .with_label_values(&[&topic])
                 .observe(
@@ -270,7 +270,7 @@ pub mod producer {
         match result {
             Err(err) => panic!("Failed to create threaded producer: {}", err.to_string()),
             Ok(producer) => Arc::new(Producer {
-                producer,
+                producer: super::producers::new(producer, 15),
                 queue_size_gauge: prometheus::register_int_gauge_vec!(
                     "kafka_internal_queue_size",
                     "Kafka internal queue size",
@@ -297,6 +297,39 @@ pub mod producer {
                 )
                 .unwrap(),
             }),
+        }
+    }
+}
+
+
+pub mod producers {
+    use std::sync::{Arc, RwLock};
+    use rdkafka::producer::FutureProducer;
+    use rdkafka::client::DefaultClientContext;
+
+    pub struct Producers {
+        items: Vec<FutureProducer<DefaultClientContext>>,
+        curr_index: Arc<RwLock<usize>>,
+    }
+
+    impl Producers {
+        pub fn next(&self) -> Option<&FutureProducer<DefaultClientContext>> {
+            let mut ci = self.curr_index.write().unwrap();
+            let producer = self.items.get(*ci);
+            *ci = (*ci + 1) % self.items.len();
+            producer.clone()
+        }
+    }
+
+    pub fn new(producer: FutureProducer, pool_size: u16) -> Producers {
+        let mut producers = Vec::new();
+        for _ in 1..pool_size {
+            producers.push(producer.clone())
+        }
+
+        Producers {
+            items: producers,
+            curr_index: Arc::new(RwLock::new(0)),
         }
     }
 }
