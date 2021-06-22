@@ -266,38 +266,34 @@ pub mod producer {
             client_config.set(k, v);
         }
 
-        let result = FutureProducer::from_config(&client_config);
-        match result {
-            Err(err) => panic!("Failed to create threaded producer: {}", err.to_string()),
-            Ok(producer) => Arc::new(Producer {
-                producer: super::producers::new(producer, 15),
-                queue_size_gauge: prometheus::register_int_gauge_vec!(
+        Arc::new(Producer {
+            producer: super::producers::new2(client_config, 15),
+            queue_size_gauge: prometheus::register_int_gauge_vec!(
                     "kafka_internal_queue_size",
                     "Kafka internal queue size",
                     &["topic"]
                 )
                 .unwrap(),
-                error_counter: prometheus::register_int_counter_vec!(
+            error_counter: prometheus::register_int_counter_vec!(
                     "kafka_errors_count",
                     "Kafka internal errors count",
                     &["topic", "error_code"]
                 )
                 .unwrap(),
-                sent_messages_counter: prometheus::register_int_counter_vec!(
+            sent_messages_counter: prometheus::register_int_counter_vec!(
                     "kafka_sent_messages",
                     "Kafka sent messages count",
                     &["topic"]
                 )
                 .unwrap(),
-                message_send_duration: prometheus::register_histogram_vec!(
+            message_send_duration: prometheus::register_histogram_vec!(
                     "kafka_message_send_duration",
                     "Kafka message send duration",
                     &["topic"],
                     prometheus::exponential_buckets(5.0, 2.0, 5).unwrap()
                 )
                 .unwrap(),
-            }),
-        }
+        })
     }
 }
 
@@ -306,6 +302,9 @@ pub mod producers {
     use std::sync::{Arc, RwLock};
     use rdkafka::producer::FutureProducer;
     use rdkafka::client::DefaultClientContext;
+    use rdkafka::ClientConfig;
+    use crate::kafka::kafka::producer::Producer;
+    use rdkafka::config::FromClientConfig;
 
     pub struct Producers {
         items: Vec<FutureProducer<DefaultClientContext>>,
@@ -325,6 +324,24 @@ pub mod producers {
         let mut producers = Vec::new();
         for _ in 1..pool_size {
             producers.push(producer.clone())
+        }
+
+        Producers {
+            items: producers,
+            curr_index: Arc::new(RwLock::new(0)),
+        }
+    }
+
+    pub fn new2(client_config: ClientConfig, pool_size: u16) -> Producers {
+        let mut producers = Vec::new();
+        for _ in 1..pool_size {
+            let result = FutureProducer::from_config(&client_config);
+            match result {
+                Ok(producer) => producers.push(producer),
+                Err(error) => {
+                    println!("Failed to create threaded producer: {}", error.to_string())
+                }
+            }
         }
 
         Producers {
